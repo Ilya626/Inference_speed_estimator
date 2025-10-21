@@ -8,7 +8,7 @@ import gradio as gr
 import pandas as pd
 import yaml
 
-from gguf_speed import formula, hf, kv, strix, table
+from gguf_speed import formula, hf, kv, local_db, strix, table
 
 DEFAULT_CONTEXTS = [4096, 8192, 16384, 24576, 32768]
 PRESETS_PATH = Path(__file__).with_name("presets.yaml")
@@ -51,7 +51,17 @@ def gather_kv(repo_id: str, token: str | None, overrides: dict[str, int | None],
         data = kv.parse_from_text(text)
         if data:
             parts.append((data, source))
+
+    entry = local_db.lookup(repo_id)
+    if entry and entry.kv_fields:
+        parts.append((entry.kv_fields, "local-db"))
+
     config, mode = kv.consolidate_configs(parts, overrides=overrides or None, dtype_bytes=dtype_bytes)
+
+    if config is None and entry and entry.kv_config is not None:
+        config = local_db.kv_override(repo_id, dtype_bytes=dtype_bytes)
+        mode = "local-db"
+
     if config is None and overrides:
         required = {"n_layers", "n_kv_heads", "head_dim"}
         if required.issubset({k for k, v in overrides.items() if v is not None}):
@@ -290,10 +300,22 @@ def run_estimator(
     except ValueError as exc:
         return None, None, f"❌ {exc}"
 
+    hf_error: Exception | None = None
     try:
         ggufs = hf.list_gguf(repo_id, token=hf_token)
     except Exception as exc:  # pragma: no cover - UI layer
-        return None, None, f"❌ Failed to list GGUF files: {exc}"
+        hf_error = exc
+        ggufs = []
+
+    if not ggufs:
+        fallback = local_db.list_gguf(repo_id)
+        if fallback:
+            ggufs = fallback
+            logs.append("Loaded GGUF metadata from local database.")
+            if hf_error is not None:
+                logs.append(f"Hugging Face lookup failed: {hf_error}")
+        elif hf_error is not None:
+            return None, None, f"❌ Failed to list GGUF files: {hf_error}"
 
     if not ggufs:
         return None, None, "⚠️ No GGUF files found in the repository."
