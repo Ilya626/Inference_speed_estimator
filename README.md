@@ -1,12 +1,12 @@
 # GGUF Speed Estimator (Strix Halo calibrated)
 
 GGUF Speed Estimator is a utility that predicts llama.cpp-style inference
-throughput for dense GGUF models hosted on the Hugging Face Hub.  The default
-calibration targets Ryzen AI 9 HX-395 (Strix Halo) in best-of mode with FA/RPC
-enabled.  The tool automatically analyses Hugging Face repositories, evaluates
-expected token generation speed for multiple context lengths, and—when
-architectural metadata is available—estimates KV cache usage to flag potential
-out-of-memory scenarios.
+throughput for dense and Mixture-of-Experts (MoE) GGUF models hosted on the
+Hugging Face Hub.  The default calibration targets Ryzen AI 9 HX-395 (Strix
+Halo) in best-of mode with FA/RPC enabled.  The tool automatically analyses
+Hugging Face repositories, evaluates expected token generation speed for
+multiple context lengths, and—when architectural metadata is
+available—estimates KV cache usage to flag potential out-of-memory scenarios.
 
 ## Quick start: Gradio UI
 
@@ -36,8 +36,12 @@ repositories, calibration constants, and memory constraints.
 
 * Use the **Contexts (tokens)** checkboxes for common lengths (4k–32k) or add
   custom values in **Extra contexts** (comma or semicolon separated).
-* **C** and **β** expose the calibration constants.  Adjust them manually or use
-  the Calibration helper to compute better fits.
+* **Model type** toggles between dense and MoE approximations.  The **Dense C**
+  and **Dense β** fields expose the dense calibration constants, while the four
+  **MoE** inputs (total/active coefficients and exponents) shape the MoE
+  approximation.  **MoE active ratio (0-1)** defines the share of active
+  parameters (`ratio × GGUF size`).  Adjust any of them manually or use the
+  Calibration helper to refine dense constants.
 * **KV dtype bytes** and **Base-model depth** control how deeply the app searches
   linked repositories for architecture metadata.
 
@@ -83,9 +87,9 @@ repositories, calibration constants, and memory constraints.
 
 * **Automatic GGUF discovery:** fetches the list of `.gguf` files directly from
   the Hugging Face model page (via `https://huggingface.co/api/models/{repo}`).
-* **Speed estimates:** applies the calibrated formula for each available quant
-  and context length (4k, 8k, 16k, 24k, 32k by default; arbitrary lengths are
-  supported).
+* **Speed estimates:** applies the calibrated dense or MoE formula for each
+  available quant and context length (4k, 8k, 16k, 24k, 32k by default; arbitrary
+  lengths are supported).
 * **Memory checks:** parses architectural fields from the model card or
   `config.json`, follows "base model" links when necessary, and reports KV cache
   footprint together with OOM status for a given memory budget.
@@ -98,12 +102,15 @@ repositories, calibration constants, and memory constraints.
   size data for popular models so you can work offline or when repository
   metadata is incomplete.
 
-> ℹ️ The current calibration is meant for dense models on Strix Halo.  For other
+> ℹ️ The bundled dense and MoE calibrations target Strix Halo.  For other
 > hardware backends, gather a few empirical points and refit the constants.
 
 ## Speed model
 
-The estimator uses the following expression for token throughput:
+The estimator ships with two analytic approximations calibrated on Strix Halo
+measurements.
+
+### Dense models
 
 \[
 \text{speed}(L) = \frac{C}{\text{size}_{\text{GiB}} + \beta \cdot L}
@@ -114,11 +121,27 @@ Where:
 * `speed(L)` – predicted tokens per second for context length `L`.
 * `size_GiB` – GGUF file size in gibibytes (GiB), reported by Hugging Face.
 * `L` – context length in tokens (e.g. 4096, 8192, 16384, 24576, 32768).
-* `C`, `β` – calibration constants (default `C = 206`, `β = 0.000512`).
+* `C`, `β` – dense calibration constants (default `C = 206`, `β = 0.000512`).
 
 If KV-cache parameters are known, an equivalent formulation with
 `α = β / \text{KV-per-token}_{\text{GiB}}` is used to reason about architecture
 impact.
+
+### MoE models
+
+\[
+\text{speed} = 2593.21 \times \text{total}^{-1.51} + 44.9 \times \text{active}^{-0.47}
+\]
+
+Where:
+
+* `speed` – predicted tokens per second.
+* `total` – GGUF artefact size in GiB (after quantisation).
+* `active` – active parameter footprint in GiB, computed as `ratio × total` for
+  a given activation sparsity (default ratio `0.113`).
+
+The four MoE coefficients are exposed in both the CLI and the UI so you can
+re-fit them for other hardware profiles.
 
 The same metadata allows us to estimate total memory usage:
 
@@ -172,7 +195,7 @@ quant variants.
 4. Click **Compute calibration** to generate constants; review the textual
    summary for validation details.
 5. Apply the preferred set with **Use average calibration** or **Use best
-   calibration**—the buttons immediately update the main **C** and **β** fields.
+   calibration**—the buttons immediately update the main **Dense C** and **Dense β** fields.
 6. Optionally persist your calibration by adding a new entry to
    `app/presets.yaml` so the preset dropdown includes your hardware profile.
 
@@ -196,9 +219,13 @@ python cli.py owner/repo --contexts 4096 8192 16384 32768 --csv out.csv
 python cli.py owner/repo \
   --n-layers 96 --n-kv-heads 8 --head-dim 128 --mem-gib 64
 
-# Adjust calibration constants or load a preset
+# Adjust dense calibration constants or load a preset
 python cli.py owner/repo --C 180 --beta 0.00042
 python cli.py owner/repo --preset strix-halo
+
+# Switch to the MoE estimator and tune its parameters
+python cli.py owner/repo --model-type moe --moe-ratio 0.12 \
+  --moe-total-coeff 2700 --moe-active-coeff 50
 ```
 
 Supply `--hf-token` if you need to access private repositories or want to avoid
@@ -206,8 +233,8 @@ rate limiting.
 
 ## Caveats
 
-* The calibration targets dense models.  Mixture-of-Experts architectures with
-  sparse activation may require a different model.
+* The shipped dense and MoE calibrations target Strix Halo measurements.  Gather
+  hardware-specific samples and refit the constants for other devices.
 * KV cache calculations assume FP16/BF16 storage.  If your runtime stores KV in
   a different format (e.g. FP8), adjust `dtype_bytes` accordingly.
 * Metadata quality on Hugging Face varies; when architectural fields are

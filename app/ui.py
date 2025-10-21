@@ -12,9 +12,13 @@ from gguf_speed import formula, hf, kv, local_db, strix, table
 
 DEFAULT_CONTEXTS = [4096, 8192, 16384, 24576, 32768]
 PRESETS_PATH = Path(__file__).with_name("presets.yaml")
+DEFAULT_DENSE_CALIBRATION = formula.DenseCalibration()
+DEFAULT_MOE_CALIBRATION = formula.MoECalibration()
+DEFAULT_MODEL_TYPE = formula.ModelType.DENSE
+DEFAULT_MOE_RATIO = formula.DEFAULT_MOE_RATIO
 
 
-def load_presets() -> Mapping[str, Mapping[str, float]]:
+def load_presets() -> Mapping[str, Mapping[str, object]]:
     if not PRESETS_PATH.exists():
         return {}
     with PRESETS_PATH.open("r", encoding="utf-8") as handle:
@@ -23,7 +27,69 @@ def load_presets() -> Mapping[str, Mapping[str, float]]:
 
 
 PRESETS = load_presets()
-DEFAULT_CALIBRATION = formula.Calibration()
+
+
+def _to_float(value: object, fallback: float) -> float:
+    try:
+        return float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return fallback
+
+
+def _extract_dense_calibration(
+    preset: Mapping[str, object], base: formula.DenseCalibration
+) -> formula.DenseCalibration:
+    section = preset.get("dense")
+    if isinstance(section, Mapping):
+        return formula.DenseCalibration(
+            C=_to_float(section.get("C"), base.C),
+            beta=_to_float(section.get("beta"), base.beta),
+        )
+    return formula.DenseCalibration(
+        C=_to_float(preset.get("C"), base.C),
+        beta=_to_float(preset.get("beta"), base.beta),
+    )
+
+
+def _extract_moe_calibration(
+    preset: Mapping[str, object], base: formula.MoECalibration
+) -> formula.MoECalibration:
+    section = preset.get("moe")
+    if isinstance(section, Mapping):
+        return formula.MoECalibration(
+            coeff_total=_to_float(section.get("coeff_total"), base.coeff_total),
+            exp_total=_to_float(section.get("exp_total"), base.exp_total),
+            coeff_active=_to_float(section.get("coeff_active"), base.coeff_active),
+            exp_active=_to_float(section.get("exp_active"), base.exp_active),
+        )
+    return formula.MoECalibration(
+        coeff_total=_to_float(preset.get("moe_coeff_total"), base.coeff_total),
+        exp_total=_to_float(preset.get("moe_exp_total"), base.exp_total),
+        coeff_active=_to_float(preset.get("moe_coeff_active"), base.coeff_active),
+        exp_active=_to_float(preset.get("moe_exp_active"), base.exp_active),
+    )
+
+
+def _extract_moe_ratio(preset: Mapping[str, object], default: float) -> float:
+    section = preset.get("moe")
+    if isinstance(section, Mapping):
+        if "ratio" in section:
+            return _to_float(section.get("ratio"), default)
+        if "moe_ratio" in section:
+            return _to_float(section.get("moe_ratio"), default)
+    if "moe_ratio" in preset:
+        return _to_float(preset.get("moe_ratio"), default)
+    return default
+
+
+def _extract_model_type(preset: Mapping[str, object], fallback: formula.ModelType) -> formula.ModelType:
+    value = preset.get("model_type")
+    if isinstance(value, str):
+        try:
+            return formula.ModelType(value)
+        except ValueError:
+            return fallback
+    return fallback
 
 
 def parse_contexts(selected: list[str] | None, extra_text: str | None) -> list[int]:
@@ -175,7 +241,7 @@ def calibrate_from_measurements(
     return avg_cal, best_cal, "\n".join(summary_lines), "✅ Calibration computed."
 
 
-def apply_calibration(cal: formula.Calibration | None, label: str):
+def apply_calibration(cal: formula.DenseCalibration | None, label: str):
     if cal is None:
         return gr.update(), gr.update(), f"❌ No {label} calibration available."
     return (
@@ -273,8 +339,14 @@ def run_estimator(
     repo_input: str,
     contexts_selected: list[str] | None,
     extra_contexts: str | None,
-    C: float,
-    beta: float,
+    model_type_value: str,
+    dense_C: float,
+    dense_beta: float,
+    moe_total_coeff: float,
+    moe_total_exp: float,
+    moe_active_coeff: float,
+    moe_active_exp: float,
+    moe_ratio: float | None,
     mem_gib: float | None,
     overhead_gib: float,
     n_layers: float | None,
@@ -299,6 +371,27 @@ def run_estimator(
         contexts = parse_contexts(contexts_selected, extra_contexts)
     except ValueError as exc:
         return None, None, f"❌ {exc}"
+
+    try:
+        model_type = formula.ModelType(model_type_value)
+    except ValueError:
+        return None, None, f"❌ Unsupported model type: {model_type_value}"
+
+    dense_calibration = formula.DenseCalibration(C=float(dense_C), beta=float(dense_beta))
+    moe_calibration = formula.MoECalibration(
+        coeff_total=float(moe_total_coeff),
+        exp_total=float(moe_total_exp),
+        coeff_active=float(moe_active_coeff),
+        exp_active=float(moe_active_exp),
+    )
+    ratio_value = None
+    if moe_ratio is not None:
+        try:
+            ratio_value = float(moe_ratio)
+        except (TypeError, ValueError):
+            return None, None, "❌ MoE ratio must be numeric."
+        if ratio_value <= 0 or ratio_value > 1:
+            return None, None, "❌ MoE ratio must be within (0, 1]."
 
     hf_error: Exception | None = None
     try:
@@ -338,16 +431,34 @@ def run_estimator(
     else:
         logs.append("KV parameters not resolved; OOM will be reported as unknown.")
 
-    calibration = formula.Calibration(C=float(C), beta=float(beta))
+    if model_type is formula.ModelType.MOE and ratio_value is None:
+        ratio_value = DEFAULT_MOE_RATIO
+
+    logs.append(f"Model type: {model_type.value}")
+    if model_type is formula.ModelType.MOE:
+        logs.append(
+            "MoE calibration → "
+            f"coeff_total={moe_calibration.coeff_total:.4f} exp_total={moe_calibration.exp_total:.4f} "
+            f"coeff_active={moe_calibration.coeff_active:.4f} exp_active={moe_calibration.exp_active:.4f} "
+            f"ratio={(ratio_value if ratio_value is not None else DEFAULT_MOE_RATIO):.4f}"
+        )
+    else:
+        logs.append(
+            "Dense calibration → "
+            f"C={dense_calibration.C:.4f} beta={dense_calibration.beta:.6g}"
+        )
+
     df = table.build(
         repo_id,
         ggufs,
         contexts,
-        calibration.C,
-        calibration.beta,
+        dense_calibration,
+        moe_calibration,
+        model_type,
         config,
         mem_gib=mem_gib,
         overhead_gib=overhead_gib,
+        moe_ratio=ratio_value,
     )
 
     temp = tempfile.NamedTemporaryFile("w", delete=False, suffix=".csv", encoding="utf-8")
@@ -359,12 +470,51 @@ def run_estimator(
 
 def apply_preset(name: str):
     preset = PRESETS.get(name) or {}
-    updates = []
-    for key in ("C", "beta", "mem_gib", "overhead_gib"):
+    updates: list[object] = []
+
+    if "model_type" in preset:
+        model_type = _extract_model_type(preset, DEFAULT_MODEL_TYPE)
+        updates.append(gr.update(value=model_type.value))
+    else:
+        updates.append(gr.update())
+
+    dense_cal = _extract_dense_calibration(preset, DEFAULT_DENSE_CALIBRATION)
+    updates.append(gr.update(value=dense_cal.C))
+    updates.append(gr.update(value=dense_cal.beta))
+
+    moe_section = preset.get("moe")
+    has_moe = isinstance(moe_section, Mapping) or any(
+        key in preset
+        for key in ("moe_coeff_total", "moe_exp_total", "moe_coeff_active", "moe_exp_active")
+    )
+    if has_moe:
+        moe_cal = _extract_moe_calibration(preset, DEFAULT_MOE_CALIBRATION)
+        updates.extend(
+            [
+                gr.update(value=moe_cal.coeff_total),
+                gr.update(value=moe_cal.exp_total),
+                gr.update(value=moe_cal.coeff_active),
+                gr.update(value=moe_cal.exp_active),
+            ]
+        )
+    else:
+        updates.extend(gr.update() for _ in range(4))
+
+    has_ratio = False
+    if isinstance(moe_section, Mapping):
+        has_ratio = "ratio" in moe_section or "moe_ratio" in moe_section
+    has_ratio = has_ratio or ("moe_ratio" in preset)
+    if has_ratio:
+        updates.append(gr.update(value=_extract_moe_ratio(preset, DEFAULT_MOE_RATIO)))
+    else:
+        updates.append(gr.update())
+
+    for key in ("mem_gib", "overhead_gib"):
         if key in preset:
             updates.append(gr.update(value=float(preset[key])))
         else:
             updates.append(gr.update())
+
     return updates
 
 
@@ -388,8 +538,42 @@ def build_ui() -> gr.Blocks:
             extra_contexts = gr.Textbox(label="Extra contexts", placeholder="Comma separated e.g. 12288, 40960")
 
         with gr.Row():
-            C = gr.Number(label="C", value=DEFAULT_CALIBRATION.C)
-            beta = gr.Number(label="β", value=DEFAULT_CALIBRATION.beta)
+            model_type = gr.Radio(
+                [
+                    ("Dense", formula.ModelType.DENSE.value),
+                    ("MoE", formula.ModelType.MOE.value),
+                ],
+                value=DEFAULT_MODEL_TYPE.value,
+                label="Model type",
+            )
+            dense_C = gr.Number(label="Dense C", value=DEFAULT_DENSE_CALIBRATION.C)
+            dense_beta = gr.Number(label="Dense β", value=DEFAULT_DENSE_CALIBRATION.beta)
+
+        with gr.Row():
+            moe_total_coeff = gr.Number(
+                label="MoE total coeff",
+                value=DEFAULT_MOE_CALIBRATION.coeff_total,
+            )
+            moe_total_exp = gr.Number(
+                label="MoE total exponent",
+                value=DEFAULT_MOE_CALIBRATION.exp_total,
+            )
+            moe_active_coeff = gr.Number(
+                label="MoE active coeff",
+                value=DEFAULT_MOE_CALIBRATION.coeff_active,
+            )
+            moe_active_exp = gr.Number(
+                label="MoE active exponent",
+                value=DEFAULT_MOE_CALIBRATION.exp_active,
+            )
+
+        with gr.Row():
+            moe_ratio = gr.Number(
+                label="MoE active ratio (0-1)",
+                value=DEFAULT_MOE_RATIO,
+                minimum=0.0,
+                maximum=1.0,
+            )
             dtype_bytes = gr.Dropdown([1, 2, 4], value=2, label="KV dtype bytes")
             max_depth = gr.Slider(0, 3, value=1, step=1, label="Base-model depth")
 
@@ -448,8 +632,14 @@ def build_ui() -> gr.Blocks:
                 repo_input,
                 contexts,
                 extra_contexts,
-                C,
-                beta,
+                model_type,
+                dense_C,
+                dense_beta,
+                moe_total_coeff,
+                moe_total_exp,
+                moe_active_coeff,
+                moe_active_exp,
+                moe_ratio,
                 mem_gib,
                 overhead_gib,
                 n_layers,
@@ -498,20 +688,31 @@ def build_ui() -> gr.Blocks:
         use_avg_button.click(
             lambda cal: apply_calibration(cal, "average"),
             inputs=[avg_state],
-            outputs=[C, beta, calibration_status],
+            outputs=[dense_C, dense_beta, calibration_status],
         )
 
         use_best_button.click(
             lambda cal: apply_calibration(cal, "best"),
             inputs=[best_state],
-            outputs=[C, beta, calibration_status],
+            outputs=[dense_C, dense_beta, calibration_status],
         )
 
         if PRESETS:
             preset.change(
                 apply_preset,
                 inputs=preset,
-                outputs=[C, beta, mem_gib, overhead_gib],
+                outputs=[
+                    model_type,
+                    dense_C,
+                    dense_beta,
+                    moe_total_coeff,
+                    moe_total_exp,
+                    moe_active_coeff,
+                    moe_active_exp,
+                    moe_ratio,
+                    mem_gib,
+                    overhead_gib,
+                ],
             )
 
     return demo

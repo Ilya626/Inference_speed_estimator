@@ -18,16 +18,72 @@ except ImportError:  # pragma: no cover - dependency guard
 from gguf_speed import formula, hf, kv, local_db, table
 
 DEFAULT_CONTEXTS = [4096, 8192, 16384, 24576, 32768]
-DEFAULT_CALIBRATION = formula.Calibration()
+DEFAULT_DENSE_CALIBRATION = formula.DenseCalibration()
+DEFAULT_MOE_CALIBRATION = formula.MoECalibration()
+DEFAULT_MODEL_TYPE = formula.ModelType.DENSE
 PRESETS_PATH = Path("app/presets.yaml")
+DEFAULT_MOE_RATIO = formula.DEFAULT_MOE_RATIO
 
 
-def load_presets(path: Path = PRESETS_PATH) -> Mapping[str, Mapping[str, float]]:
+def load_presets(path: Path = PRESETS_PATH) -> Mapping[str, Mapping[str, object]]:
     if yaml is None or not path.exists():
         return {}
     with path.open("r", encoding="utf-8") as handle:
         data = yaml.safe_load(handle) or {}
     return data.get("presets", {})
+
+
+def _to_float(value: object, fallback: float) -> float:
+    try:
+        return float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return fallback
+
+
+def _extract_dense_calibration(
+    preset: Mapping[str, object], base: formula.DenseCalibration
+) -> formula.DenseCalibration:
+    section = preset.get("dense")
+    if isinstance(section, Mapping):
+        return formula.DenseCalibration(
+            C=_to_float(section.get("C"), base.C),
+            beta=_to_float(section.get("beta"), base.beta),
+        )
+    return formula.DenseCalibration(
+        C=_to_float(preset.get("C"), base.C),
+        beta=_to_float(preset.get("beta"), base.beta),
+    )
+
+
+def _extract_moe_calibration(
+    preset: Mapping[str, object], base: formula.MoECalibration
+) -> formula.MoECalibration:
+    section = preset.get("moe")
+    if isinstance(section, Mapping):
+        return formula.MoECalibration(
+            coeff_total=_to_float(section.get("coeff_total"), base.coeff_total),
+            exp_total=_to_float(section.get("exp_total"), base.exp_total),
+            coeff_active=_to_float(section.get("coeff_active"), base.coeff_active),
+            exp_active=_to_float(section.get("exp_active"), base.exp_active),
+        )
+    return formula.MoECalibration(
+        coeff_total=_to_float(preset.get("moe_coeff_total"), base.coeff_total),
+        exp_total=_to_float(preset.get("moe_exp_total"), base.exp_total),
+        coeff_active=_to_float(preset.get("moe_coeff_active"), base.coeff_active),
+        exp_active=_to_float(preset.get("moe_exp_active"), base.exp_active),
+    )
+
+
+def _extract_moe_ratio(preset: Mapping[str, object], default: float) -> float:
+    section = preset.get("moe")
+    if isinstance(section, Mapping):
+        if "ratio" in section:
+            return _to_float(section.get("ratio"), default)
+        if "moe_ratio" in section:
+            return _to_float(section.get("moe_ratio"), default)
+    if "moe_ratio" in preset:
+        return _to_float(preset.get("moe_ratio"), default)
+    return default
 
 
 def gather_kv_config(
@@ -54,8 +110,55 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Estimate GGUF inference speed and memory usage.")
     parser.add_argument("repo", help="Hugging Face repo ID or URL")
     parser.add_argument("--contexts", nargs="*", type=int, default=DEFAULT_CONTEXTS, help="Context lengths in tokens")
-    parser.add_argument("--C", dest="C", type=float, default=DEFAULT_CALIBRATION.C, help="Calibration constant C")
-    parser.add_argument("--beta", type=float, default=DEFAULT_CALIBRATION.beta, help="Calibration constant beta")
+    parser.add_argument(
+        "--C",
+        dest="C",
+        type=float,
+        default=DEFAULT_DENSE_CALIBRATION.C,
+        help="Dense calibration constant C",
+    )
+    parser.add_argument(
+        "--beta",
+        type=float,
+        default=DEFAULT_DENSE_CALIBRATION.beta,
+        help="Dense calibration constant beta",
+    )
+    parser.add_argument(
+        "--model-type",
+        choices=[item.value for item in formula.ModelType],
+        default=DEFAULT_MODEL_TYPE.value,
+        help="Model type for the speed approximation (dense or moe)",
+    )
+    parser.add_argument(
+        "--moe-ratio",
+        type=float,
+        default=None,
+        help="Active parameter ratio for MoE models (0-1)",
+    )
+    parser.add_argument(
+        "--moe-total-coeff",
+        type=float,
+        default=DEFAULT_MOE_CALIBRATION.coeff_total,
+        help="Coefficient for the total size term in the MoE formula",
+    )
+    parser.add_argument(
+        "--moe-total-exp",
+        type=float,
+        default=DEFAULT_MOE_CALIBRATION.exp_total,
+        help="Exponent for the total size term in the MoE formula",
+    )
+    parser.add_argument(
+        "--moe-active-coeff",
+        type=float,
+        default=DEFAULT_MOE_CALIBRATION.coeff_active,
+        help="Coefficient for the active size term in the MoE formula",
+    )
+    parser.add_argument(
+        "--moe-active-exp",
+        type=float,
+        default=DEFAULT_MOE_CALIBRATION.exp_active,
+        help="Exponent for the active size term in the MoE formula",
+    )
     parser.add_argument("--preset", help="Name of a preset defined in app/presets.yaml")
     parser.add_argument("--mem-gib", type=float, default=None, help="Memory budget in GiB")
     parser.add_argument("--overhead-gib", type=float, default=4.0, help="Additional overhead in GiB")
@@ -92,20 +195,36 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     repo_id = hf.normalize_repo_id(args.repo)
 
-    calibration = formula.Calibration(C=args.C, beta=args.beta)
+    dense_calibration = formula.DenseCalibration(C=args.C, beta=args.beta)
+    moe_calibration = formula.MoECalibration(
+        coeff_total=args.moe_total_coeff,
+        exp_total=args.moe_total_exp,
+        coeff_active=args.moe_active_coeff,
+        exp_active=args.moe_active_exp,
+    )
+    model_type = formula.ModelType(args.model_type)
+    moe_ratio = args.moe_ratio
     presets = load_presets()
     if args.preset:
         preset = presets.get(args.preset)
         if not preset:
             parser.error(f"Unknown preset: {args.preset}")
-        calibration = formula.Calibration(
-            C=float(preset.get("C", calibration.C)),
-            beta=float(preset.get("beta", calibration.beta)),
-        )
+        dense_calibration = _extract_dense_calibration(preset, dense_calibration)
+        moe_calibration = _extract_moe_calibration(preset, moe_calibration)
+        if moe_ratio is None:
+            moe_ratio = _extract_moe_ratio(preset, DEFAULT_MOE_RATIO)
+        if "model_type" in preset and args.model_type == parser.get_default("model_type"):
+            try:
+                model_type = formula.ModelType(str(preset["model_type"]))
+            except ValueError:
+                pass
         if "mem_gib" in preset and args.mem_gib is None:
             args.mem_gib = float(preset["mem_gib"])
         if "overhead_gib" in preset and args.overhead_gib == parser.get_default("overhead_gib"):
             args.overhead_gib = float(preset["overhead_gib"])
+
+    if model_type is formula.ModelType.MOE and moe_ratio is None:
+        moe_ratio = DEFAULT_MOE_RATIO
 
     contexts = args.contexts or DEFAULT_CONTEXTS
     try:
@@ -162,15 +281,32 @@ def main(argv: Sequence[str] | None = None) -> int:
     else:
         print("KV parameters not found; OOM estimation disabled.")
 
+    print(f"Model type: {model_type.value}")
+    if model_type is formula.ModelType.MOE:
+        ratio_display = moe_ratio if moe_ratio is not None else DEFAULT_MOE_RATIO
+        print(
+            "MoE calibration → "
+            f"coeff_total={moe_calibration.coeff_total:.4f} exp_total={moe_calibration.exp_total:.4f} "
+            f"coeff_active={moe_calibration.coeff_active:.4f} exp_active={moe_calibration.exp_active:.4f} "
+            f"ratio={ratio_display:.4f}"
+        )
+    else:
+        print(
+            "Dense calibration → "
+            f"C={dense_calibration.C:.4f} beta={dense_calibration.beta:.6g}"
+        )
+
     df = table.build(
         repo_id,
         ggufs,
         contexts,
-        calibration.C,
-        calibration.beta,
+        dense_calibration,
+        moe_calibration,
+        model_type,
         config,
         mem_gib=args.mem_gib,
         overhead_gib=args.overhead_gib,
+        moe_ratio=moe_ratio,
     )
 
     assert pd is not None
