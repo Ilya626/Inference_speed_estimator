@@ -7,6 +7,6 @@ calculations, :mod:`gguf_speed.formula` for the calibrated speed model, and
 :mod:`gguf_speed.table` for assembling tabular outputs.
 """
 
-from . import formula, hf, kv, strix, table
+from . import formula, hf, kv, local_db, quant, strix, table
 
-__all__ = ["formula", "hf", "kv", "strix", "table"]
+__all__ = ["formula", "hf", "kv", "local_db", "quant", "strix", "table"]

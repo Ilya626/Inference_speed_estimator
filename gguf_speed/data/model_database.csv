@@ -1,0 +1,19 @@
+repo,model_family,variant,n_layers,n_heads,n_kv_heads,hidden_size,head_dim,dtype_bytes,gguf_file,quant,size_bytes,source
+meta-llama/Meta-Llama-3-8B-Instruct-GGUF,Llama 3,8B,32,32,8,4096,128,2,Meta-Llama-3-8B-Instruct.Q4_K_M.gguf,Q4_K_M,4402341478,manual
+meta-llama/Meta-Llama-3-8B-Instruct-GGUF,Llama 3,8B,32,32,8,4096,128,2,Meta-Llama-3-8B-Instruct.Q5_K_M.gguf,Q5_K_M,5315022029,manual
+meta-llama/Meta-Llama-3-8B-Instruct-GGUF,Llama 3,8B,32,32,8,4096,128,2,Meta-Llama-3-8B-Instruct.Q8_0.gguf,Q8_0,8267812045,manual
+meta-llama/Meta-Llama-3-70B-Instruct-GGUF,Llama 3,70B,80,64,8,8192,128,2,Meta-Llama-3-70B-Instruct.Q4_K_M.gguf,Q4_K_M,36721970381,manual
+meta-llama/Meta-Llama-3-70B-Instruct-GGUF,Llama 3,70B,80,64,8,8192,128,2,Meta-Llama-3-70B-Instruct.Q5_K_M.gguf,Q5_K_M,44560285696,manual
+meta-llama/Meta-Llama-3-70B-Instruct-GGUF,Llama 3,70B,80,64,8,8192,128,2,Meta-Llama-3-70B-Instruct.Q8_0.gguf,Q8_0,68719476736,manual
+TheBloke/Llama-2-7B-Chat-GGUF,Llama 2,7B,32,32,32,4096,128,2,Llama-2-7B-Chat.Q4_K_M.gguf,Q4_K_M,4080218931,manual
+TheBloke/Llama-2-7B-Chat-GGUF,Llama 2,7B,32,32,32,4096,128,2,Llama-2-7B-Chat.Q5_K_M.gguf,Q5_K_M,4885525299,manual
+TheBloke/Llama-2-7B-Chat-GGUF,Llama 2,7B,32,32,32,4096,128,2,Llama-2-7B-Chat.Q8_0.gguf,Q8_0,7408818586,manual
+TheBloke/Mistral-7B-Instruct-v0.2-GGUF,Mistral,7B,32,32,8,4096,128,2,Mistral-7B-Instruct-v0.2.Q4_K_M.gguf,Q4_K_M,3865470566,manual
+TheBloke/Mistral-7B-Instruct-v0.2-GGUF,Mistral,7B,32,32,8,4096,128,2,Mistral-7B-Instruct-v0.2.Q5_K_M.gguf,Q5_K_M,4617089843,manual
+TheBloke/Mistral-7B-Instruct-v0.2-GGUF,Mistral,7B,32,32,8,4096,128,2,Mistral-7B-Instruct-v0.2.Q8_0.gguf,Q8_0,7086696038,manual
+TheBloke/Mixtral-8x7B-Instruct-v0.1-GGUF,Mixtral,8x7B,32,32,8,4096,128,2,Mixtral-8x7B-Instruct-v0.1.Q4_K_M.gguf,Q4_K_M,28454158336,manual
+TheBloke/Mixtral-8x7B-Instruct-v0.1-GGUF,Mixtral,8x7B,32,32,8,4096,128,2,Mixtral-8x7B-Instruct-v0.1.Q5_K_M.gguf,Q5_K_M,33930241638,manual
+TheBloke/Mixtral-8x7B-Instruct-v0.1-GGUF,Mixtral,8x7B,32,32,8,4096,128,2,Mixtral-8x7B-Instruct-v0.1.Q8_0.gguf,Q8_0,54546084659,manual
+microsoft/Phi-3-mini-4k-instruct-gguf,Phi-3,Mini,32,32,8,3072,96,2,Phi-3-mini-4k-instruct.Q4_K_M.gguf,Q4_K_M,2684354560,manual
+microsoft/Phi-3-mini-4k-instruct-gguf,Phi-3,Mini,32,32,8,3072,96,2,Phi-3-mini-4k-instruct.Q5_K_M.gguf,Q5_K_M,3435973837,manual
+microsoft/Phi-3-mini-4k-instruct-gguf,Phi-3,Mini,32,32,8,3072,96,2,Phi-3-mini-4k-instruct.Q8_0.gguf,Q8_0,5476083302,manual

@@ -63,7 +63,10 @@ def _build_headers(token: str | None) -> MutableMapping[str, str]:
 
 def get_model_info(repo_id: str, token: str | None = None) -> Mapping[str, object]:
     url = _API_BASE + repo_id
-    response = requests.get(url, headers=_build_headers(token))
+    try:
+        response = requests.get(url, headers=_build_headers(token))
+    except requests.RequestException as exc:  # pragma: no cover - network guard
+        raise HFError(f"Error fetching model info for {repo_id}: {exc}") from exc
     if response.status_code == 404:
         raise HFError(f"Repository not found: {repo_id}")
     if response.status_code >= 300:
@@ -173,7 +176,11 @@ def read_repo_text(
     url = _RESOLVE_TEMPLATE.format(repo_id=repo_id, revision=revision, path=path)
     headers = _build_headers(token)
     headers["Accept"] = "text/plain"
-    response = requests.get(url, headers=headers)
+    try:
+        response = requests.get(url, headers=headers)
+    except requests.RequestException as exc:  # pragma: no cover - network guard
+        LOGGER.warning("Failed to fetch %s from %s: %s", path, repo_id, exc)
+        return None
     if response.status_code == 404:
         return None
     if response.status_code >= 300:
