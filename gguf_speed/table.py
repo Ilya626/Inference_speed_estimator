@@ -1,12 +1,27 @@
 """Assemble tabular outputs for the GGUF speed estimator."""
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Mapping, Sequence
 
 import pandas as pd
 
 from . import formula, kv, quant
+
+
+LOGGER = logging.getLogger(__name__)
+
+
+def _parse_size_bytes(value: object) -> int | None:
+    """Best-effort conversion of a ``size`` field into an integer."""
+
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def build(
@@ -41,8 +56,15 @@ def build(
     )
     for file_info in ggufs:
         name = str(file_info.get("rfilename"))
-        size_bytes = int(file_info.get("size", 0))
-        size_gib = formula.bytes_to_gib(size_bytes)
+        raw_size = file_info.get("size")
+        size_bytes = _parse_size_bytes(raw_size)
+        if size_bytes is None:
+            LOGGER.warning(
+                "Unable to parse size for %s; omitting size-dependent metrics (raw value: %r)",
+                name,
+                raw_size,
+            )
+        size_gib = formula.bytes_to_gib(size_bytes) if size_bytes is not None else None
         raw_quant = file_info.get("quant")
         quant_label = (
             str(raw_quant)
@@ -50,20 +72,40 @@ def build(
             else quant.infer_quant(name)
         )
         bpw = None
-        if param_estimate and param_estimate > 0 and size_bytes > 0:
+        if (
+            param_estimate
+            and param_estimate > 0
+            and size_bytes is not None
+            and size_bytes > 0
+        ):
             bpw = round(quant.bpw_from_size(size_bytes, param_estimate), 4)
 
-        active_gib = size_gib * ratio if ratio is not None else None
+        active_gib = size_gib * ratio if (ratio is not None and size_gib is not None) else None
         for context in contexts:
             context_tokens = int(context)
+            speed_est = None
             if model_type is formula.ModelType.MOE:
-                speed_est = (
-                    moe_cal.speed(size_gib, active_gib)
-                    if active_gib is not None
-                    else None
-                )
+                if size_gib is not None and active_gib is not None:
+                    try:
+                        speed_est = moe_cal.speed(size_gib, active_gib)
+                    except ValueError:
+                        LOGGER.warning(
+                            "MoE speed calculation failed for %s (size=%s, active=%s)",
+                            name,
+                            size_gib,
+                            active_gib,
+                        )
             else:
-                speed_est = dense_cal.speed(size_gib, context_tokens)
+                if size_gib is not None:
+                    try:
+                        speed_est = dense_cal.speed(size_gib, context_tokens)
+                    except ValueError:
+                        LOGGER.warning(
+                            "Dense speed calculation failed for %s (size=%s, context=%s)",
+                            name,
+                            size_gib,
+                            context_tokens,
+                        )
 
             kv_gib = None
             est_mem = None
@@ -78,7 +120,7 @@ def build(
                 kv_gib = kv_per_token * context_tokens if kv_per_token else None
                 est_mem = (
                     formula.mem_need(size_gib, kv_gib, overhead_gib)
-                    if kv_gib is not None
+                    if (kv_gib is not None and size_gib is not None)
                     else None
                 )
                 n_layers = kv_config.n_layers
@@ -97,7 +139,7 @@ def build(
                     "quant": quant_label,
                     "bpw": bpw,
                     "params_b": params_billions,
-                    "size_gib": round(size_gib, 4),
+                    "size_gib": round(size_gib, 4) if size_gib is not None else None,
                     "context_tokens": context_tokens,
                     "pred_speed_toks_per_s": round(speed_est, 3)
                     if speed_est is not None

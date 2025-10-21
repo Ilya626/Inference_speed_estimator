@@ -469,7 +469,23 @@ def run_estimator(
     temp = tempfile.NamedTemporaryFile("w", delete=False, suffix=".csv", encoding="utf-8")
     table.to_csv(df, temp.name)
     temp.close()
-    logs.append(f"Processed {len(ggufs)} GGUF files across {len(contexts)} context lengths.")
+
+    file_count = int(df["file"].nunique()) if not df.empty else 0
+    if file_count < len(ggufs):
+        logs.append(
+            f"⚠️ Only {file_count} of {len(ggufs)} GGUF files produced predictions due to missing metadata."
+        )
+    missing_size_files = (
+        int(df.loc[df["size_gib"].isna(), "file"].nunique()) if not df.empty else 0
+    )
+    if missing_size_files:
+        logs.append(
+            "⚠️ Size metadata was unavailable for "
+            f"{missing_size_files} GGUF file(s); size-dependent metrics were left blank."
+        )
+    logs.append(
+        f"Processed {file_count} GGUF file{'s' if file_count != 1 else ''} across {len(contexts)} context lengths."
+    )
     return df, temp.name, "\n".join(logs)
 
 
