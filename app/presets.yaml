@@ -1,6 +1,14 @@
 presets:
   strix-halo:
-    C: 206
-    beta: 0.000512
+    model_type: dense
+    dense:
+      C: 206
+      beta: 0.000512
+    moe:
+      coeff_total: 2593.21
+      exp_total: -1.51
+      coeff_active: 44.9
+      exp_active: -0.47
+      ratio: 0.113
     mem_gib: 64
     overhead_gib: 4

@@ -13,14 +13,25 @@ def build(
     repo_id: str,
     ggufs: Sequence[Mapping[str, object]],
     contexts: Sequence[int],
-    C: float,
-    beta: float,
+    dense_calibration: formula.DenseCalibration | None,
+    moe_calibration: formula.MoECalibration | None,
+    model_type: formula.ModelType,
     kv_config: kv.KVConfig | None,
     *,
     mem_gib: float | None = None,
     overhead_gib: float = 0.0,
+    moe_ratio: float | None = None,
 ) -> pd.DataFrame:
     """Produce a pandas DataFrame with the computed statistics."""
+
+    dense_cal = dense_calibration or formula.DenseCalibration()
+    moe_cal = moe_calibration or formula.MoECalibration()
+    if model_type is formula.ModelType.MOE:
+        ratio = moe_ratio if moe_ratio is not None else formula.DEFAULT_MOE_RATIO
+        if ratio <= 0 or ratio > 1:
+            raise ValueError("MoE active ratio must be within (0, 1].")
+    else:
+        ratio = None
 
     rows: list[dict[str, object]] = []
     kv_per_token = kv_config.kv_per_token_gib if kv_config else None
@@ -42,9 +53,17 @@ def build(
         if param_estimate and param_estimate > 0 and size_bytes > 0:
             bpw = round(quant.bpw_from_size(size_bytes, param_estimate), 4)
 
+        active_gib = size_gib * ratio if ratio is not None else None
         for context in contexts:
             context_tokens = int(context)
-            speed_est = formula.speed(size_gib, context_tokens, C, beta)
+            if model_type is formula.ModelType.MOE:
+                speed_est = (
+                    moe_cal.speed(size_gib, active_gib)
+                    if active_gib is not None
+                    else None
+                )
+            else:
+                speed_est = dense_cal.speed(size_gib, context_tokens)
 
             kv_gib = None
             est_mem = None
@@ -74,12 +93,15 @@ def build(
                 {
                     "repo": repo_id,
                     "file": name,
+                    "model_type": model_type.value,
                     "quant": quant_label,
                     "bpw": bpw,
                     "params_b": params_billions,
                     "size_gib": round(size_gib, 4),
                     "context_tokens": context_tokens,
-                    "pred_speed_toks_per_s": round(speed_est, 3),
+                    "pred_speed_toks_per_s": round(speed_est, 3)
+                    if speed_est is not None
+                    else None,
                     "kv_mode": kv_mode,
                     "n_layers": n_layers,
                     "n_kv": n_kv_heads,
@@ -87,6 +109,10 @@ def build(
                     "kv_gib": round(kv_gib, 4) if kv_gib is not None else None,
                     "est_mem_gib": round(est_mem, 4) if est_mem is not None else None,
                     "oom": oom_state,
+                    "moe_ratio": round(ratio, 4) if ratio is not None else None,
+                    "moe_active_gib": round(active_gib, 4)
+                    if active_gib is not None
+                    else None,
                 }
             )
 
@@ -95,6 +121,7 @@ def build(
         [
             "repo",
             "file",
+            "model_type",
             "quant",
             "bpw",
             "params_b",
@@ -108,6 +135,8 @@ def build(
             "kv_gib",
             "est_mem_gib",
             "oom",
+            "moe_ratio",
+            "moe_active_gib",
         ]
     ]
     return df
