@@ -1,0 +1,6 @@
+presets:
+  strix-halo:
+    C: 206
+    beta: 0.000512
+    mem_gib: 64
+    overhead_gib: 4
