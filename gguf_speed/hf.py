@@ -61,10 +61,18 @@ def _build_headers(token: str | None) -> MutableMapping[str, str]:
     return headers
 
 
-def get_model_info(repo_id: str, token: str | None = None) -> Mapping[str, object]:
+def get_model_info(
+    repo_id: str,
+    token: str | None = None,
+    *,
+    expand_files: bool = True,
+) -> Mapping[str, object]:
     url = _API_BASE + repo_id
+    params: MutableMapping[str, object] | None = None
+    if expand_files:
+        params = {"expand": ["repo", "files"]}
     try:
-        response = requests.get(url, headers=_build_headers(token))
+        response = requests.get(url, headers=_build_headers(token), params=params)
     except requests.RequestException as exc:  # pragma: no cover - network guard
         raise HFError(f"Error fetching model info for {repo_id}: {exc}") from exc
     if response.status_code == 404:
@@ -77,7 +85,14 @@ def get_model_info(repo_id: str, token: str | None = None) -> Mapping[str, objec
 def _extract_size(entry: Mapping[str, object]) -> int | None:
     """Return the file size stored in a model sibling entry if available."""
 
-    candidates: list[object | None] = [entry.get("size")]
+    candidates: list[object | None] = [
+        entry.get("size"),
+        entry.get("size_in_bytes"),
+        entry.get("size_bytes"),
+        entry.get("sizeBytes"),
+        entry.get("file_size"),
+        entry.get("fileSize"),
+    ]
 
     lfs_info = entry.get("lfs")
     if isinstance(lfs_info, Mapping):
@@ -87,6 +102,19 @@ def _extract_size(entry: Mapping[str, object]) -> int | None:
     if isinstance(s3_pointer, Mapping):
         candidates.append(s3_pointer.get("size"))
         candidates.append(s3_pointer.get("size_bytes"))
+        candidates.append(s3_pointer.get("sizeBytes"))
+
+    blob_info = entry.get("blob") or entry.get("pointer")
+    if isinstance(blob_info, Mapping):
+        candidates.append(blob_info.get("size"))
+        candidates.append(blob_info.get("size_bytes"))
+        candidates.append(blob_info.get("sizeBytes"))
+
+    metadata = entry.get("metadata")
+    if isinstance(metadata, Mapping):
+        candidates.append(metadata.get("size"))
+        candidates.append(metadata.get("size_bytes"))
+        candidates.append(metadata.get("sizeBytes"))
 
     for candidate in candidates:
         if candidate is None:
