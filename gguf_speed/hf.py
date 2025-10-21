@@ -74,18 +74,44 @@ def get_model_info(
     expand_files: bool = True,
 ) -> Mapping[str, object]:
     url = _API_BASE + repo_id
-    params: MutableMapping[str, object] | None = None
+    params_candidates: Sequence[MutableMapping[str, object] | None]
     if expand_files:
-        params = {"expand": ["repo", "files"]}
-    try:
-        response = requests.get(url, headers=_build_headers(token), params=params)
-    except requests.RequestException as exc:  # pragma: no cover - network guard
-        raise HFError(f"Error fetching model info for {repo_id}: {exc}") from exc
-    if response.status_code == 404:
-        raise HFError(f"Repository not found: {repo_id}")
-    if response.status_code >= 300:
-        raise HFError(f"Unexpected API error {response.status_code}: {response.text}")
-    return response.json()
+        params_candidates = [
+            {"expand": ["siblings"]},
+            {"expand": ["files"]},
+            {"expand": ["repo", "files"]},
+            None,
+        ]
+    else:
+        params_candidates = [None]
+
+    last_error: str | None = None
+    for params in params_candidates:
+        request_params = None if params is None else dict(params)
+        try:
+            response = requests.get(
+                url, headers=_build_headers(token), params=request_params
+            )
+        except requests.RequestException as exc:  # pragma: no cover - network guard
+            raise HFError(f"Error fetching model info for {repo_id}: {exc}") from exc
+
+        if response.status_code == 404:
+            raise HFError(f"Repository not found: {repo_id}")
+
+        if response.status_code >= 300:
+            error_message = f"Unexpected API error {response.status_code}: {response.text}"
+            if (
+                response.status_code == 400
+                and expand_files
+                and params is not None
+            ):
+                last_error = error_message
+                continue
+            raise HFError(error_message)
+
+        return response.json()
+
+    raise HFError(last_error or f"Unable to fetch model info for {repo_id}")
 
 
 def _extract_siblings_from_mapping(data: object) -> Sequence[Mapping[str, object]]:
