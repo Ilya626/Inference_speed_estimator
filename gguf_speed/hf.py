@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
 from collections.abc import Mapping as ABCMapping, Sequence as ABCSequence
 from pathlib import Path
@@ -167,6 +168,103 @@ def _fetch_model_page_metadata(repo_id: str, token: str | None = None) -> Mappin
     return _parse_model_page(response.text)
 
 
+_SIZE_UNIT_FACTORS = {
+    "b": 1,
+    "kb": 1000,
+    "mb": 1000**2,
+    "gb": 1000**3,
+    "tb": 1000**4,
+    "pb": 1000**5,
+    "kib": 1024,
+    "mib": 1024**2,
+    "gib": 1024**3,
+    "tib": 1024**4,
+    "pib": 1024**5,
+}
+
+_SIZE_RE = re.compile(
+    r"(?P<number>[0-9]+(?:[\s_,.][0-9]+)*)\s*(?P<unit>[kmgtp]?i?b)?",
+    re.IGNORECASE,
+)
+_PLAIN_NUMBER_RE = re.compile(r"^[0-9]+(?:[\s_,.][0-9]+)*$")
+
+
+def _parse_size_candidate(candidate: object) -> int | None:
+    """Best-effort conversion of a single size metadata value to bytes."""
+
+    if candidate is None:
+        return None
+
+    if isinstance(candidate, bool):
+        return None
+
+    if isinstance(candidate, (int, float)):
+        if math.isfinite(candidate) and candidate >= 0:
+            return int(candidate)
+        return None
+
+    if isinstance(candidate, bytes):
+        try:
+            candidate = candidate.decode("utf-8", errors="ignore")
+        except Exception:  # pragma: no cover - extremely defensive
+            return None
+
+    if isinstance(candidate, str):
+        text = candidate.strip()
+        if not text:
+            return None
+
+        # Embedded JSON payloads occasionally appear inside metadata fields.
+        if text.startswith("{") and text.endswith("}"):
+            try:
+                decoded = json.loads(text)
+            except json.JSONDecodeError:
+                pass
+            else:
+                if isinstance(decoded, Mapping):
+                    for key in ("size", "size_bytes", "sizeBytes"):
+                        maybe = decoded.get(key)
+                        size = _parse_size_candidate(maybe)
+                        if size is not None:
+                            return size
+                elif isinstance(decoded, (int, float)):
+                    return _parse_size_candidate(decoded)
+
+        # Git-LFS pointer blobs may be provided as raw text.
+        pointer_match = re.search(r"size\s*[:=]?\s*(\d+)", text, re.IGNORECASE)
+        if pointer_match:
+            return int(pointer_match.group(1))
+
+        # Generic "number + unit" format.
+        matches = list(_SIZE_RE.finditer(text))
+        for match in reversed(matches):
+            unit = match.group("unit")
+            number_text = match.group("number")
+            if not number_text:
+                continue
+            normalized = number_text.replace(" ", "").replace(",", "").replace("_", "")
+            try:
+                value = float(normalized)
+            except ValueError:
+                continue
+            if value < 0 or not math.isfinite(value):
+                continue
+            if unit:
+                factor = _SIZE_UNIT_FACTORS.get(unit.lower())
+                if factor is None:
+                    continue
+                bytes_value = value * factor
+            else:
+                # Only accept plain integers without additional context.
+                if not _PLAIN_NUMBER_RE.fullmatch(text):
+                    continue
+                bytes_value = value
+            if bytes_value >= 0:
+                return int(bytes_value)
+
+    return None
+
+
 def _extract_size(entry: Mapping[str, object]) -> int | None:
     """Return the file size stored in a model sibling entry if available."""
 
@@ -180,8 +278,11 @@ def _extract_size(entry: Mapping[str, object]) -> int | None:
     ]
 
     lfs_info = entry.get("lfs")
+    fallback_candidates: list[object | None] = []
+
     if isinstance(lfs_info, Mapping):
         candidates.append(lfs_info.get("size"))
+        fallback_candidates.append(lfs_info.get("text"))
 
     s3_pointer = entry.get("s3_pointer") or entry.get("s3Pointer")
     if isinstance(s3_pointer, Mapping):
@@ -194,6 +295,11 @@ def _extract_size(entry: Mapping[str, object]) -> int | None:
         candidates.append(blob_info.get("size"))
         candidates.append(blob_info.get("size_bytes"))
         candidates.append(blob_info.get("sizeBytes"))
+        pointer_text = blob_info.get("text")
+        if pointer_text is not None:
+            fallback_candidates.append(pointer_text)
+    elif isinstance(blob_info, str):
+        fallback_candidates.append(blob_info)
 
     metadata = entry.get("metadata")
     if isinstance(metadata, Mapping):
@@ -201,14 +307,11 @@ def _extract_size(entry: Mapping[str, object]) -> int | None:
         candidates.append(metadata.get("size_bytes"))
         candidates.append(metadata.get("sizeBytes"))
 
+    candidates.extend(fallback_candidates)
+
     for candidate in candidates:
-        if candidate is None:
-            continue
-        try:
-            size = int(candidate)
-        except (TypeError, ValueError):
-            continue
-        if size >= 0:
+        size = _parse_size_candidate(candidate)
+        if size is not None:
             return size
     return None
 
