@@ -20,6 +20,11 @@ out-of-memory scenarios.
   footprint together with OOM status for a given memory budget.
 * **Multiple outputs:** produces a tabular summary, lets you export to CSV, and
   ships with a Gradio UI for point-and-click exploration.
+* **Quant insight:** infers nominal bits-per-weight (bpw) for each GGUF file and
+  reports an approximate parameter count derived from the artefact sizes.
+* **Local metadata fallback:** includes a curated CSV with KV-cache and GGUF
+  size data for popular models so you can work offline or when repository
+  metadata is incomplete.
 
 > ℹ️ The current calibration is meant for dense models on Strix Halo.  For other
 > hardware backends, gather a few empirical points and refit the constants.
@@ -57,6 +62,17 @@ The KV cache term is computed as:
 
 The default `dtype_bytes` is 2 (FP16/BF16) and the multiplier accounts for both
 K and V tensors.
+
+## Local metadata CSV
+
+When network access is unavailable—or when Hugging Face metadata omits key
+fields—the tool falls back to `gguf_speed/data/model_database.csv`.  The CSV
+contains rows for popular repositories, including KV-cache parameters and
+typical GGUF artefact sizes across common quantizations.  The CLI and Gradio UI
+automatically consult this file when online lookups fail, so you can still
+estimate KV requirements and memory usage for those models.  Extend or replace
+the CSV with your own entries to cover additional architectures or quant
+variants.
 
 ## How it works
 

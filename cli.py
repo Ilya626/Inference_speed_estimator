@@ -15,7 +15,7 @@ try:
 except ImportError:  # pragma: no cover - dependency guard
     yaml = None  # type: ignore
 
-from gguf_speed import formula, hf, kv, table
+from gguf_speed import formula, hf, kv, local_db, table
 
 DEFAULT_CONTEXTS = [4096, 8192, 16384, 24576, 32768]
 DEFAULT_CALIBRATION = formula.Calibration()
@@ -43,6 +43,9 @@ def gather_kv_config(
         data = kv.parse_from_text(text)
         if data:
             parts.append((data, source))
+    entry = local_db.lookup(repo_id)
+    if entry and entry.kv_fields:
+        parts.append((entry.kv_fields, "local-db"))
     config, mode = kv.consolidate_configs(parts, overrides=overrides, dtype_bytes=dtype_bytes)
     return config, mode
 
@@ -105,10 +108,19 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.overhead_gib = float(preset["overhead_gib"])
 
     contexts = args.contexts or DEFAULT_CONTEXTS
-    ggufs = hf.list_gguf(repo_id, token=args.hf_token)
+    try:
+        ggufs = hf.list_gguf(repo_id, token=args.hf_token)
+    except hf.HFError as exc:
+        print(f"Failed to fetch GGUF metadata from Hugging Face: {exc}")
+        ggufs = []
+
     if not ggufs:
-        print("No GGUF files found.")
-        return 1
+        ggufs = local_db.list_gguf(repo_id)
+        if ggufs:
+            print("Using local database for GGUF metadata.")
+        else:
+            print("No GGUF files found.")
+            return 1
 
     overrides = {
         "n_layers": args.n_layers,

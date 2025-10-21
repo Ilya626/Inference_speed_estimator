@@ -6,21 +6,7 @@ from typing import Mapping, Sequence
 
 import pandas as pd
 
-from . import formula, kv
-
-
-def infer_quant(rfilename: str) -> str:
-    """Best-effort extraction of the quantization label from a GGUF filename."""
-
-    name = Path(rfilename).name
-    if not name.lower().endswith(".gguf"):
-        return "unknown"
-    stem = name[:-5]
-    if "-" in stem:
-        quant = stem.split("-")[-1]
-    else:
-        quant = stem
-    return quant
+from . import formula, kv, quant
 
 
 def build(
@@ -38,11 +24,23 @@ def build(
 
     rows: list[dict[str, object]] = []
     kv_per_token = kv_config.kv_per_token_gib if kv_config else None
+    param_estimate = quant.estimate_param_count(ggufs)
+    params_billions = (
+        round(param_estimate / 1e9, 4) if param_estimate and param_estimate > 0 else None
+    )
     for file_info in ggufs:
         name = str(file_info.get("rfilename"))
         size_bytes = int(file_info.get("size", 0))
         size_gib = formula.bytes_to_gib(size_bytes)
-        quant = infer_quant(name)
+        raw_quant = file_info.get("quant")
+        quant_label = (
+            str(raw_quant)
+            if isinstance(raw_quant, str) and raw_quant.strip()
+            else quant.infer_quant(name)
+        )
+        bpw = None
+        if param_estimate and param_estimate > 0 and size_bytes > 0:
+            bpw = round(quant.bpw_from_size(size_bytes, param_estimate), 4)
 
         for context in contexts:
             context_tokens = int(context)
@@ -76,7 +74,9 @@ def build(
                 {
                     "repo": repo_id,
                     "file": name,
-                    "quant": quant,
+                    "quant": quant_label,
+                    "bpw": bpw,
+                    "params_b": params_billions,
                     "size_gib": round(size_gib, 4),
                     "context_tokens": context_tokens,
                     "pred_speed_toks_per_s": round(speed_est, 3),
@@ -96,6 +96,8 @@ def build(
             "repo",
             "file",
             "quant",
+            "bpw",
+            "params_b",
             "size_gib",
             "context_tokens",
             "pred_speed_toks_per_s",
