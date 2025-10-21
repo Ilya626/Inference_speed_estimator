@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 import tempfile
 from pathlib import Path
 from typing import Mapping
@@ -7,6 +8,10 @@ from typing import Mapping
 import gradio as gr
 import pandas as pd
 import yaml
+
+ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.append(str(ROOT))
 
 from gguf_speed import formula, hf, kv, local_db, strix, table
 
