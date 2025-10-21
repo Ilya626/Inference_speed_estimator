@@ -73,6 +73,32 @@ class HuggingFaceQwenCalculationTests(unittest.TestCase):
             overhead_gib=4.0,
         )
 
+        # Отображаем таблицу расчёта, чтобы автотест явно печатал параметры в консоль.
+        display_columns = [
+            "file",
+            "quant",
+            "context_tokens",
+            "size_gib",
+            "pred_speed_toks_per_s",
+            "kv_gib",
+            "est_mem_gib",
+            "oom",
+        ]
+        display_df = (
+            df[display_columns]
+            .sort_values(["file", "context_tokens"])
+            .reset_index(drop=True)
+        )
+        formatters = {
+            "context_tokens": lambda value: f"{int(value):d}",
+            "size_gib": lambda value: f"{float(value):.4f}",
+            "pred_speed_toks_per_s": lambda value: f"{float(value):.3f}",
+            "kv_gib": lambda value: f"{float(value):.4f}",
+            "est_mem_gib": lambda value: f"{float(value):.4f}",
+        }
+        calculation_report = display_df.to_string(index=False, formatters=formatters)
+        print("\nРасчёт скоростей для unsloth/Qwen3-14B-GGUF:\n" + calculation_report)
+
         self.assertEqual(len(df), len(gguf_entries) * len(contexts))
         self.assertEqual(sorted(df["context_tokens"].unique().tolist()), sorted(contexts))
         self.assertEqual(df["repo"].unique().tolist(), [repo_id])
