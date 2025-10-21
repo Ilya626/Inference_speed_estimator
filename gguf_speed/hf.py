@@ -1,8 +1,10 @@
 """Helpers for talking to the Hugging Face Hub."""
 from __future__ import annotations
 
+import json
 import logging
 import re
+from collections.abc import Mapping as ABCMapping, Sequence as ABCSequence
 from pathlib import Path
 from typing import Iterator, Mapping, MutableMapping, Sequence
 from urllib.parse import urlparse
@@ -11,7 +13,11 @@ import requests
 
 LOGGER = logging.getLogger(__name__)
 _API_BASE = "https://huggingface.co/api/models/"
+_MODEL_PAGE_TEMPLATE = "https://huggingface.co/{repo_id}"
 _RESOLVE_TEMPLATE = "https://huggingface.co/{repo_id}/resolve/{revision}/{path}"
+_NEXT_DATA_RE = re.compile(
+    r"<script[^>]+id=\"__NEXT_DATA__\"[^>]*>(?P<data>.*?)</script>", re.DOTALL
+)
 
 
 class HFError(RuntimeError):
@@ -82,6 +88,59 @@ def get_model_info(
     return response.json()
 
 
+def _extract_siblings_from_mapping(data: object) -> Sequence[Mapping[str, object]]:
+    stack: list[object] = [data]
+    while stack:
+        current = stack.pop()
+        if isinstance(current, ABCMapping):
+            siblings = current.get("siblings")
+            if isinstance(siblings, ABCSequence) and not isinstance(
+                siblings, (str, bytes, bytearray)
+            ):
+                filtered: list[Mapping[str, object]] = []
+                for item in siblings:
+                    if isinstance(item, ABCMapping):
+                        filtered.append(dict(item))
+                if filtered:
+                    return filtered
+            stack.extend(current.values())
+        elif isinstance(current, ABCSequence) and not isinstance(
+            current, (str, bytes, bytearray)
+        ):
+            stack.extend(current)
+    raise HFError("Model page JSON does not contain sibling metadata.")
+
+
+def _parse_model_page(html: str) -> Mapping[str, object]:
+    match = _NEXT_DATA_RE.search(html)
+    if not match:
+        raise HFError("Unable to locate Hugging Face page metadata script.")
+    payload = match.group("data")
+    try:
+        data = json.loads(payload)
+    except json.JSONDecodeError as exc:
+        raise HFError(f"Failed to decode Hugging Face page metadata: {exc}") from exc
+    siblings = _extract_siblings_from_mapping(data)
+    return {"siblings": siblings}
+
+
+def _fetch_model_page_metadata(repo_id: str, token: str | None = None) -> Mapping[str, object]:
+    url = _MODEL_PAGE_TEMPLATE.format(repo_id=repo_id)
+    headers = _build_headers(token)
+    headers["Accept"] = "text/html,application/xhtml+xml"
+    try:
+        response = requests.get(url, headers=headers)
+    except requests.RequestException as exc:  # pragma: no cover - network guard
+        raise HFError(f"Error fetching model page for {repo_id}: {exc}") from exc
+    if response.status_code == 404:
+        raise HFError(f"Repository not found: {repo_id}")
+    if response.status_code >= 300:
+        raise HFError(
+            f"Unexpected model page error {response.status_code}: {response.text}"
+        )
+    return _parse_model_page(response.text)
+
+
 def _extract_size(entry: Mapping[str, object]) -> int | None:
     """Return the file size stored in a model sibling entry if available."""
 
@@ -129,7 +188,29 @@ def _extract_size(entry: Mapping[str, object]) -> int | None:
 
 
 def list_gguf(repo_id: str, token: str | None = None) -> list[Mapping[str, object]]:
-    info = get_model_info(repo_id, token=token)
+    try:
+        info = get_model_info(repo_id, token=token)
+    except HFError as exc:
+        message = str(exc)
+        if message.startswith("Repository not found"):
+            LOGGER.error("Repository %s not found when listing GGUF files", repo_id)
+            raise
+        LOGGER.error(
+            "Hugging Face API failed for %s: %s; attempting HTML fallback",
+            repo_id,
+            exc,
+        )
+        try:
+            info = _fetch_model_page_metadata(repo_id, token=token)
+        except HFError as fallback_exc:
+            LOGGER.error(
+                "Model page fallback failed for %s: %s",
+                repo_id,
+                fallback_exc,
+            )
+            raise
+        else:
+            LOGGER.info("Retrieved GGUF listing for %s via HTML fallback", repo_id)
     files: list[Mapping[str, object]] = []
     for sibling in info.get("siblings", []):
         name = sibling.get("rfilename")
