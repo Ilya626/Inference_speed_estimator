@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import re
+from pathlib import Path
 from typing import Iterator, Mapping, MutableMapping, Sequence
 from urllib.parse import urlparse
 
@@ -86,6 +87,80 @@ def list_gguf(repo_id: str, token: str | None = None) -> list[Mapping[str, objec
         files.append({"rfilename": name, "size": int(size)})
     files.sort(key=lambda item: item["rfilename"])
     return files
+
+
+def parse_gguf_reference(value: str) -> tuple[str, str]:
+    """Parse a GGUF reference into ``(repo_id, file_path)``."""
+
+    value = value.strip()
+    if not value:
+        raise ValueError("GGUF reference is empty.")
+
+    if "://" in value:
+        parsed = urlparse(value)
+        if parsed.netloc and "huggingface.co" not in parsed.netloc:
+            raise ValueError(f"Unsupported host for GGUF reference: {parsed.netloc}")
+        segments = [segment for segment in parsed.path.split("/") if segment]
+        if len(segments) < 3:
+            raise ValueError("GGUF URL is missing path information.")
+        repo_id = normalize_repo_id("/".join(segments[:2]))
+        tail = segments[2:]
+        if tail and tail[0] in {"blob", "resolve", "tree"}:
+            if len(tail) < 3:
+                raise ValueError("GGUF URL is missing revision or filename.")
+            tail = tail[2:]
+        file_path = "/".join(tail)
+    elif ":" in value:
+        repo_part, file_part = value.split(":", 1)
+        repo_id = normalize_repo_id(repo_part)
+        file_path = file_part.lstrip("/")
+    else:
+        parts = [segment for segment in value.split("/") if segment]
+        if len(parts) < 3:
+            raise ValueError("GGUF reference must include repo and filename.")
+        repo_id = normalize_repo_id("/".join(parts[:2]))
+        file_path = "/".join(parts[2:])
+
+    file_path = file_path.lstrip("/")
+    if not file_path:
+        raise ValueError("GGUF reference does not include a filename.")
+    return repo_id, file_path
+
+
+def get_gguf_file(
+    repo_id: str,
+    file_path: str,
+    *,
+    token: str | None = None,
+) -> Mapping[str, object]:
+    """Return metadata for a GGUF file within ``repo_id``.
+
+    Parameters
+    ----------
+    repo_id:
+        Hugging Face repository identifier (``owner/repo``).
+    file_path:
+        Path to the GGUF file within the repository.  May include directories.
+    token:
+        Optional Hugging Face token used for authentication.
+    """
+
+    file_path = file_path.lstrip("/")
+    ggufs = list_gguf(repo_id, token=token)
+    for entry in ggufs:
+        name = str(entry.get("rfilename"))
+        if name == file_path:
+            return entry
+
+    target = Path(file_path).name
+    matches = [entry for entry in ggufs if Path(str(entry.get("rfilename"))).name == target]
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        raise HFError(
+            f"Multiple GGUF files named {target!r} found in {repo_id}; provide the full path."
+        )
+    raise HFError(f"GGUF file not found in {repo_id}: {file_path}")
 
 
 def read_repo_text(

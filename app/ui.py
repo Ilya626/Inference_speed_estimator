@@ -8,7 +8,7 @@ import gradio as gr
 import pandas as pd
 import yaml
 
-from gguf_speed import formula, hf, kv, table
+from gguf_speed import formula, hf, kv, strix, table
 
 DEFAULT_CONTEXTS = [4096, 8192, 16384, 24576, 32768]
 PRESETS_PATH = Path(__file__).with_name("presets.yaml")
@@ -64,6 +64,199 @@ def gather_kv(repo_id: str, token: str | None, overrides: dict[str, int | None],
             )
             mode = "override"
     return config, mode, parts
+
+
+def _parse_context(value: float | None, label: str) -> int:
+    if value is None:
+        raise ValueError(f"{label} is required when providing speeds.")
+    context = int(value)
+    if abs(context - float(value)) > 1e-6:
+        raise ValueError(f"{label} must be an integer number of tokens.")
+    if context <= 0:
+        raise ValueError(f"{label} must be positive.")
+    return context
+
+
+def _parse_speed(value: float | None, label: str) -> float:
+    if value is None:
+        raise ValueError(f"{label} is required for calibration.")
+    speed = float(value)
+    if speed <= 0:
+        raise ValueError(f"{label} must be positive.")
+    return speed
+
+
+def calibrate_from_measurements(
+    gguf_ref: str,
+    context_a: float | None,
+    avg_speed_a: float | None,
+    best_speed_a: float | None,
+    context_b: float | None,
+    avg_speed_b: float | None,
+    best_speed_b: float | None,
+    hf_token: str | None,
+):
+    try:
+        repo_id, file_path = hf.parse_gguf_reference(gguf_ref)
+    except ValueError as exc:
+        return None, None, "", f"❌ {exc}"
+
+    try:
+        file_info = hf.get_gguf_file(repo_id, file_path, token=hf_token)
+    except Exception as exc:  # pragma: no cover - UI layer
+        return None, None, "", f"❌ Failed to resolve GGUF file: {exc}"
+
+    size_bytes = int(file_info.get("size", 0))
+    size_gib = formula.bytes_to_gib(size_bytes)
+
+    samples_avg: list[tuple[float, int, float]] = []
+    samples_best: list[tuple[float, int, float]] = []
+
+    try:
+        if any(x is not None for x in (avg_speed_a, best_speed_a)):
+            context_a_tokens = _parse_context(context_a, "Context A")
+            if avg_speed_a is not None:
+                samples_avg.append((size_gib, context_a_tokens, _parse_speed(avg_speed_a, "Average speed A")))
+            if best_speed_a is not None:
+                samples_best.append((size_gib, context_a_tokens, _parse_speed(best_speed_a, "Best speed A")))
+        if any(x is not None for x in (avg_speed_b, best_speed_b)):
+            context_b_tokens = _parse_context(context_b, "Context B")
+            if avg_speed_b is not None:
+                samples_avg.append((size_gib, context_b_tokens, _parse_speed(avg_speed_b, "Average speed B")))
+            if best_speed_b is not None:
+                samples_best.append((size_gib, context_b_tokens, _parse_speed(best_speed_b, "Best speed B")))
+    except ValueError as exc:
+        return None, None, "", f"❌ {exc}"
+
+    summary_lines = [
+        f"Resolved: {repo_id}/{file_info.get('rfilename')} ({size_gib:.4f} GiB)",
+    ]
+
+    avg_cal: formula.Calibration | None = None
+    best_cal: formula.Calibration | None = None
+
+    if len(samples_avg) >= 2:
+        try:
+            avg_cal = formula.fit_calibration(samples_avg)
+            summary_lines.append(
+                "Average calibration → "
+                f"C = {avg_cal.C:.3f}, β = {avg_cal.beta:.6g}"
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            summary_lines.append(f"Average calibration failed: {exc}")
+    else:
+        summary_lines.append("Average calibration → need at least two measurements.")
+
+    if len(samples_best) >= 2:
+        try:
+            best_cal = formula.fit_calibration(samples_best)
+            summary_lines.append(
+                "Best calibration → "
+                f"C = {best_cal.C:.3f}, β = {best_cal.beta:.6g}"
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            summary_lines.append(f"Best calibration failed: {exc}")
+    else:
+        summary_lines.append("Best calibration → need at least two measurements.")
+
+    if avg_cal is None and best_cal is None:
+        return None, None, "", "⚠️ Unable to compute calibration constants."
+
+    return avg_cal, best_cal, "\n".join(summary_lines), "✅ Calibration computed."
+
+
+def apply_calibration(cal: formula.Calibration | None, label: str):
+    if cal is None:
+        return gr.update(), gr.update(), f"❌ No {label} calibration available."
+    return (
+        gr.update(value=cal.C),
+        gr.update(value=cal.beta),
+        f"✅ Applied {label} calibration: C = {cal.C:.3f}, β = {cal.beta:.6g}",
+    )
+
+
+def load_strix_measurements(perf_url: str):
+    if not perf_url or not perf_url.strip():
+        return (
+            gr.update(value=None),
+            "",
+            "⚠️ Provide a Strix Halo performance link to import measurements.",
+            *(gr.update() for _ in range(6)),
+        )
+
+    try:
+        measurements, label = strix.fetch_performance(perf_url)
+    except ValueError as exc:
+        return (
+            gr.update(value=None),
+            "",
+            f"❌ {exc}",
+            *(gr.update() for _ in range(6)),
+        )
+    except strix.PerformanceError as exc:
+        return (
+            gr.update(value=None),
+            "",
+            f"❌ {exc}",
+            *(gr.update() for _ in range(6)),
+        )
+    except Exception as exc:  # pragma: no cover - defensive for network errors
+        return (
+            gr.update(value=None),
+            "",
+            f"❌ Failed to load performance data: {exc}",
+            *(gr.update() for _ in range(6)),
+        )
+
+    rows = [
+        {
+            "Context (tokens)": item.context,
+            "Average tok/s": item.avg,
+            "Best tok/s": item.best,
+        }
+        for item in measurements
+    ]
+    table_df = pd.DataFrame(rows)
+
+    contexts = ", ".join(str(item.context) for item in measurements)
+    summary_lines = []
+    if label:
+        summary_lines.append(f"Source: {label}")
+    summary_lines.append(f"Contexts available: {contexts}")
+    summary = "\n".join(summary_lines)
+
+    if len(measurements) < 2:
+        status = "⚠️ Only one context detected; provide another measurement before calibrating."
+    else:
+        status = f"✅ Loaded {len(measurements)} contexts from the Strix Halo dataset."
+
+    first = measurements[0] if measurements else None
+    last = measurements[-1] if len(measurements) > 1 else None
+
+    def _update(measurement: strix.Measurement | None, attr: str):
+        if measurement is None:
+            return gr.update()
+        value = getattr(measurement, attr)
+        if value is None:
+            return gr.update()
+        return gr.update(value=value)
+
+    context_updates = []
+    if first is not None:
+        context_updates.append(gr.update(value=first.context))
+        context_updates.append(_update(first, "avg"))
+        context_updates.append(_update(first, "best"))
+    else:
+        context_updates.extend(gr.update() for _ in range(3))
+
+    if last is not None:
+        context_updates.append(gr.update(value=last.context))
+        context_updates.append(_update(last, "avg"))
+        context_updates.append(_update(last, "best"))
+    else:
+        context_updates.extend(gr.update() for _ in range(3))
+
+    return (table_df, summary, status, *context_updates)
 
 
 def run_estimator(
@@ -161,6 +354,9 @@ def build_ui() -> gr.Blocks:
             repo_input = gr.Textbox(label="Hugging Face repo or URL", placeholder="https://huggingface.co/owner/repo", lines=1)
             preset = gr.Dropdown(sorted(PRESETS.keys()), label="Preset", value="strix-halo" if "strix-halo" in PRESETS else None)
 
+        avg_state = gr.State()
+        best_state = gr.State()
+
         with gr.Row():
             contexts = gr.CheckboxGroup(
                 [str(v) for v in DEFAULT_CONTEXTS],
@@ -186,6 +382,37 @@ def build_ui() -> gr.Blocks:
             head_dim = gr.Number(label="head_dim", precision=0)
             hidden_size = gr.Number(label="hidden_size", precision=0)
             n_heads = gr.Number(label="n_heads", precision=0)
+
+        with gr.Accordion("Calibration helper", open=False):
+            gguf_ref = gr.Textbox(
+                label="GGUF reference",
+                placeholder="https://huggingface.co/owner/repo/resolve/main/model.gguf",
+            )
+            perf_url = gr.Textbox(
+                label="Strix Halo performance link",
+                placeholder="https://strixhalo-homelab.d7.wtf/AI/llamacpp-performance/...",
+            )
+            load_perf_button = gr.Button("Load Strix Halo data", variant="secondary")
+            performance_table = gr.Dataframe(
+                label="Imported performance measurements",
+                interactive=False,
+            )
+            performance_summary = gr.Markdown()
+            performance_status = gr.Markdown()
+            with gr.Row():
+                context_a = gr.Number(label="Context A (tokens)", precision=0)
+                avg_speed_a = gr.Number(label="Average speed A (tok/s)")
+                best_speed_a = gr.Number(label="Best speed A (tok/s)")
+            with gr.Row():
+                context_b = gr.Number(label="Context B (tokens)", precision=0)
+                avg_speed_b = gr.Number(label="Average speed B (tok/s)")
+                best_speed_b = gr.Number(label="Best speed B (tok/s)")
+            calibrate_button = gr.Button("Compute calibration", variant="secondary")
+            with gr.Row():
+                use_avg_button = gr.Button("Use average calibration")
+                use_best_button = gr.Button("Use best calibration")
+            calibration_summary = gr.Markdown()
+            calibration_status = gr.Markdown()
 
         run_button = gr.Button("Fetch & Compute", variant="primary")
 
@@ -213,6 +440,49 @@ def build_ui() -> gr.Blocks:
                 max_depth,
             ],
             outputs=[result_table, csv_file, log_output],
+        )
+
+        calibrate_button.click(
+            calibrate_from_measurements,
+            inputs=[
+                gguf_ref,
+                context_a,
+                avg_speed_a,
+                best_speed_a,
+                context_b,
+                avg_speed_b,
+                best_speed_b,
+                hf_token,
+            ],
+            outputs=[avg_state, best_state, calibration_summary, calibration_status],
+        )
+
+        load_perf_button.click(
+            load_strix_measurements,
+            inputs=[perf_url],
+            outputs=[
+                performance_table,
+                performance_summary,
+                performance_status,
+                context_a,
+                avg_speed_a,
+                best_speed_a,
+                context_b,
+                avg_speed_b,
+                best_speed_b,
+            ],
+        )
+
+        use_avg_button.click(
+            lambda cal: apply_calibration(cal, "average"),
+            inputs=[avg_state],
+            outputs=[C, beta, calibration_status],
+        )
+
+        use_best_button.click(
+            lambda cal: apply_calibration(cal, "best"),
+            inputs=[best_state],
+            outputs=[C, beta, calibration_status],
         )
 
         if PRESETS:

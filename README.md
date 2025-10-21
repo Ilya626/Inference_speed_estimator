@@ -121,6 +121,22 @@ are shown in an interactive table with a download button for the generated CSV.
 * Update the defaults or create a new preset in `app/presets.yaml` for quick
   reuse.
 
+### Gradio calibration helper
+
+The Gradio UI ships with a **Calibration helper** accordion.  Provide a direct
+link (or `owner/repo:path`) to a GGUF file together with empirical speed
+measurements for two different context lengths (both average and best results
+are supported).  The tool resolves the model size automatically, fits the
+calibration constants, and lets you apply either set of coefficients to the main
+estimator with a single click.
+
+If you already have results recorded on the Strix Halo llama.cpp performance
+portal, paste the public link into the **Strix Halo performance link** field and
+press **Load Strix Halo data**.  The UI will fetch the available contexts (both
+average and best throughput), pre-populate the measurement fields, and render a
+mini table so you can double-check the import before computing calibration
+constants.
+
 ## Caveats
 
 * The calibration targets dense models.  Mixture-of-Experts architectures with
