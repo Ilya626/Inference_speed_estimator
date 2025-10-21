@@ -74,6 +74,32 @@ def get_model_info(repo_id: str, token: str | None = None) -> Mapping[str, objec
     return response.json()
 
 
+def _extract_size(entry: Mapping[str, object]) -> int | None:
+    """Return the file size stored in a model sibling entry if available."""
+
+    candidates: list[object | None] = [entry.get("size")]
+
+    lfs_info = entry.get("lfs")
+    if isinstance(lfs_info, Mapping):
+        candidates.append(lfs_info.get("size"))
+
+    s3_pointer = entry.get("s3_pointer") or entry.get("s3Pointer")
+    if isinstance(s3_pointer, Mapping):
+        candidates.append(s3_pointer.get("size"))
+        candidates.append(s3_pointer.get("size_bytes"))
+
+    for candidate in candidates:
+        if candidate is None:
+            continue
+        try:
+            size = int(candidate)
+        except (TypeError, ValueError):
+            continue
+        if size >= 0:
+            return size
+    return None
+
+
 def list_gguf(repo_id: str, token: str | None = None) -> list[Mapping[str, object]]:
     info = get_model_info(repo_id, token=token)
     files: list[Mapping[str, object]] = []
@@ -83,11 +109,11 @@ def list_gguf(repo_id: str, token: str | None = None) -> list[Mapping[str, objec
             continue
         if not name.lower().endswith(".gguf"):
             continue
-        size = sibling.get("size")
+        size = _extract_size(sibling)
         if size is None:
             LOGGER.warning("Skipping %s with unknown size", name)
             continue
-        files.append({"rfilename": name, "size": int(size)})
+        files.append({"rfilename": name, "size": size})
     files.sort(key=lambda item: item["rfilename"])
     return files
 
