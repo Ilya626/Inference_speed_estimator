@@ -8,7 +8,78 @@ expected token generation speed for multiple context lengths, and—when
 architectural metadata is available—estimates KV cache usage to flag potential
 out-of-memory scenarios.
 
-## Features
+## Quick start: Gradio UI
+
+The fastest way to explore models is via the bundled Gradio interface.
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+
+python app/ui.py
+```
+
+Gradio launches on <http://127.0.0.1:7860> by default.  The UI remembers your
+previous inputs while the server is running, making it easy to iterate on
+repositories, calibration constants, and memory constraints.
+
+### UI tour
+
+**Repository & presets**
+
+* Paste a Hugging Face URL or `owner/repo` slug into **Hugging Face repo or URL**.
+* Pick a **Preset** (from `app/presets.yaml`) to preload calibration constants
+  and default memory budgets—`strix-halo` ships out of the box.
+
+**Contexts & calibration controls**
+
+* Use the **Contexts (tokens)** checkboxes for common lengths (4k–32k) or add
+  custom values in **Extra contexts** (comma or semicolon separated).
+* **C** and **β** expose the calibration constants.  Adjust them manually or use
+  the Calibration helper to compute better fits.
+* **KV dtype bytes** and **Base-model depth** control how deeply the app searches
+  linked repositories for architecture metadata.
+
+**Memory budgets & overrides**
+
+* Specify **Memory budget (GiB)** and **Overhead (GiB)** to enable OOM
+  annotations in the results table.
+* Provide a private **HF token** if the repository is gated or to raise the rate
+  limit.
+* Expand **KV overrides** to manually fill `n_layers`, `n_kv_heads`, `head_dim`,
+  `hidden_size`, or `n_heads` when metadata is missing.
+
+**Results, CSV export & activity log**
+
+* Press **Fetch & Compute** to enumerate `.gguf` files, evaluate each requested
+  context, and populate the **Predictions** dataframe.
+* The **Download CSV** widget provides a ready-to-share export; Gradio generates
+  a fresh file every time the estimator runs.
+* Review the **log** panel for KV cache source information, measurement
+  assumptions, and progress summaries.
+
+**Calibration helper**
+
+* Expand the **Calibration helper** accordion to calibrate directly inside the
+  UI.
+* Paste a direct GGUF link into **GGUF reference** so the helper can infer the
+  model size.
+* Optionally load historical throughput from the Strix Halo portal via
+  **Strix Halo performance link** and **Load Strix Halo data**—detected contexts
+  pre-fill the measurement fields and surface a preview table.
+* Provide at least two contexts (average and/or best token rates) and click
+  **Compute calibration**.  The helper outputs textual summaries plus separate
+  average/best calibration objects.
+* Apply the new constants to the main form with **Use average calibration** or
+  **Use best calibration**.
+
+> ℹ️ Presets live in `app/presets.yaml`; drop in your own calibration constants
+> and memory defaults to share team-wide setups.  The UI also auto-loads
+> `gguf_speed/data/model_database.csv` when Hugging Face metadata is incomplete,
+> so you keep KV insights even while offline.
+
+## Features at a glance
 
 * **Automatic GGUF discovery:** fetches the list of `.gguf` files directly from
   the Hugging Face model page (via `https://huggingface.co/api/models/{repo}`).
@@ -18,8 +89,9 @@ out-of-memory scenarios.
 * **Memory checks:** parses architectural fields from the model card or
   `config.json`, follows "base model" links when necessary, and reports KV cache
   footprint together with OOM status for a given memory budget.
-* **Multiple outputs:** produces a tabular summary, lets you export to CSV, and
-  ships with a Gradio UI for point-and-click exploration.
+* **Interactive UI workflows:** presets, checkbox-driven contexts, inline
+  overrides, CSV export, logs, and built-in calibration tools streamline ad-hoc
+  exploration.
 * **Quant insight:** infers nominal bits-per-weight (bpw) for each GGUF file and
   reports an approximate parameter count derived from the artefact sizes.
 * **Local metadata fallback:** includes a curated CSV with KV-cache and GGUF
@@ -68,11 +140,11 @@ K and V tensors.
 When network access is unavailable—or when Hugging Face metadata omits key
 fields—the tool falls back to `gguf_speed/data/model_database.csv`.  The CSV
 contains rows for popular repositories, including KV-cache parameters and
-typical GGUF artefact sizes across common quantizations.  The CLI and Gradio UI
-automatically consult this file when online lookups fail, so you can still
-estimate KV requirements and memory usage for those models.  Extend or replace
-the CSV with your own entries to cover additional architectures or quant
-variants.
+typical GGUF artefact sizes across common quantizations.  Both the CLI and
+Gradio UI automatically consult this file when online lookups fail, so you can
+still estimate KV requirements and memory usage for those models.  Extend or
+replace the CSV with your own entries to cover additional architectures or
+quant variants.
 
 ## How it works
 
@@ -89,15 +161,29 @@ variants.
 6. Present the result as a table, optionally emit a CSV file, and expose the
    workflow through a Gradio interface.
 
-## Installation
+## Calibration workflow in Gradio
 
-```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-```
+1. Open the **Calibration helper** accordion in the UI.
+2. Provide a direct GGUF reference (`https://huggingface.co/.../model.gguf` or
+   `owner/repo:path`) so the tool can resolve the artefact size automatically.
+3. Either load measurements from the Strix Halo portal with **Load Strix Halo
+   data** or type in your own average/best token rates for two distinct context
+   lengths.
+4. Click **Compute calibration** to generate constants; review the textual
+   summary for validation details.
+5. Apply the preferred set with **Use average calibration** or **Use best
+   calibration**—the buttons immediately update the main **C** and **β** fields.
+6. Optionally persist your calibration by adding a new entry to
+   `app/presets.yaml` so the preset dropdown includes your hardware profile.
 
-## Command-line usage
+For scripted or bulk calibration, you can still call
+`gguf_speed.formula.fit_calibration` directly from Python.  See the CLI section
+below for automation-friendly options.
+
+## Additional: command-line interface
+
+The CLI remains available for batch processing, CI pipelines, or environments
+without a browser.  It mirrors the UI functionality with flag-based controls.
 
 ```bash
 # Basic run (uses default contexts and calibration)
@@ -117,41 +203,6 @@ python cli.py owner/repo --preset strix-halo
 
 Supply `--hf-token` if you need to access private repositories or want to avoid
 rate limiting.
-
-## Gradio UI
-
-```bash
-python app/ui.py
-```
-
-The interface lets you select context lengths via checkboxes, tweak calibration
-constants, set memory and overhead budgets, and override KV parameters.  Results
-are shown in an interactive table with a download button for the generated CSV.
-
-## Calibration guidance
-
-* Collect a few measurements `(size_GiB, context_tokens, speed)` for your
-  hardware.
-* Use the CLI or a separate script to fit `C` and `β` with
-  `gguf_speed.formula.fit_calibration`.
-* Update the defaults or create a new preset in `app/presets.yaml` for quick
-  reuse.
-
-### Gradio calibration helper
-
-The Gradio UI ships with a **Calibration helper** accordion.  Provide a direct
-link (or `owner/repo:path`) to a GGUF file together with empirical speed
-measurements for two different context lengths (both average and best results
-are supported).  The tool resolves the model size automatically, fits the
-calibration constants, and lets you apply either set of coefficients to the main
-estimator with a single click.
-
-If you already have results recorded on the Strix Halo llama.cpp performance
-portal, paste the public link into the **Strix Halo performance link** field and
-press **Load Strix Halo data**.  The UI will fetch the available contexts (both
-average and best throughput), pre-populate the measurement fields, and render a
-mini table so you can double-check the import before computing calibration
-constants.
 
 ## Caveats
 
